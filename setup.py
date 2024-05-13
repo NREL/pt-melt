@@ -1,0 +1,36 @@
+import platform
+
+from setuptools import setup
+
+install_requires = ["pytest", "tqdm"]
+print(f"Platform: {platform.system()}")
+
+if platform.system() == "Linux":
+    print(f"Installing PyTorch with GPU support for {platform.system()}")
+    # Install PyTorch with GPU support
+    pass
+elif platform.system() == "Darwin":
+    # Install PyTorch for Mac
+    install_requires.append("torch")
+    install_requires.append("torchvision")
+    install_requires.append("torchaudio")
+else:
+    raise ValueError(f"Unsupported platform: {platform.system()}")
+
+setup(
+    name="ptmelt",
+    version="0.0.0",
+    description="PyTorch Machine Learning Toolbox (PT-MELT)",
+    url="https://github.com/NREL/pt-melt",
+    author="Nicholas T. Wimer",
+    author_email="nwimer@nrel.gov",
+    license="BSD 3-Clause License",
+    packages=["ptmelt"],
+    install_requires=install_requires,
+    classifiers=[
+        "Development Status :: 1 - Planning",
+        "Intended Audience :: Science/Research",
+        # "Programming Language :: Python :: 3.11",
+    ],
+    # python_requires=">=3.8, <3.12",
+)
