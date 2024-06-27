@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from ptmelt.blocks import DefaultOutput, DenseBlock, ResidualBlock
+from ptmelt.blocks import DefaultOutput, DenseBlock, MixtureDensityOutput, ResidualBlock
+from ptmelt.losses import MixtureDensityLoss
 
 
 class MELTModel(nn.Module):
@@ -27,6 +28,8 @@ class MELTModel(nn.Module):
         initializer (str, optional): The weight initializer to use.
         l1_reg (float, optional): The L1 regularization strength.
         l2_reg (float, optional): The L2 regularization strength.
+        num_mixtures (int, optional): The number of mixture components for MDN.
+        node_list (list, optional): The list of nodes per layer.
         **kwargs: Additional keyword arguments.
 
     """
@@ -47,6 +50,7 @@ class MELTModel(nn.Module):
         initializer: Optional[str] = "glorot_uniform",
         l1_reg: Optional[float] = 0.0,
         l2_reg: Optional[float] = 0.0,
+        num_mixtures: Optional[int] = 0,
         node_list: Optional[list] = None,
         **kwargs,
     ):
@@ -66,6 +70,7 @@ class MELTModel(nn.Module):
         self.initializer = initializer
         self.l1_reg = l1_reg
         self.l2_reg = l2_reg
+        self.num_mixtures = num_mixtures
         self.node_list = node_list
 
         # Determine if network should be defined based on depth/width or node_list
@@ -98,17 +103,32 @@ class MELTModel(nn.Module):
 
     def create_output_layer(self):
         """Create the output layer."""
-        self.layer_dict.update(
-            {
-                "output": DefaultOutput(
-                    input_features=self.layer_width[-1],
-                    output_features=self.num_outputs,
-                    activation=self.output_activation,
-                    initializer=self.initializer,
-                )
-            }
-        )
-        self.sub_layer_names.append("output")
+        if self.num_mixtures > 0:
+            self.layer_dict.update(
+                {
+                    "output": MixtureDensityOutput(
+                        input_features=self.layer_width[-1],
+                        num_mixtures=self.num_mixtures,
+                        num_outputs=self.num_outputs,
+                        activation=self.output_activation,
+                        initializer=self.initializer,
+                    )
+                }
+            )
+            self.sub_layer_names.append("output")
+
+        else:
+            self.layer_dict.update(
+                {
+                    "output": DefaultOutput(
+                        input_features=self.layer_width[-1],
+                        output_features=self.num_outputs,
+                        activation=self.output_activation,
+                        initializer=self.initializer,
+                    )
+                }
+            )
+            self.sub_layer_names.append("output")
 
     def compute_jacobian(self, x):
         """Compute the Jacobian of the model with respect to the input."""
@@ -131,6 +151,24 @@ class MELTModel(nn.Module):
             if p.requires_grad and "weight" in name
         )
         return 0.5 * lambda_l2 * l2_norm
+
+    def get_loss_fn(
+        self, loss: Optional[str] = "mse", reduction: Optional[str] = "mean"
+    ):
+        """Get the loss function for the model."""
+        if self.num_mixtures > 0:
+            warnings.warn(
+                "Mixture Density Networks require the use of the MixtureDensityLoss "
+                "class. The loss function will be set to automatically."
+            )
+
+            return MixtureDensityLoss(
+                num_mixtures=self.num_mixtures, num_outputs=self.num_outputs
+            )
+        elif loss == "mse":
+            return nn.MSELoss(reduction=reduction)
+        else:
+            raise ValueError(f"Loss function {loss} not recognized.")
 
     def fit(self, train_dl, val_dl, optimizer, criterion, num_epochs):
         """Perform the model training loop."""

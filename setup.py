@@ -1,6 +1,6 @@
 import platform
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
 install_requires = ["pytest", "tqdm"]
 print(f"Platform: {platform.system()}")
@@ -19,13 +19,13 @@ else:
 
 setup(
     name="ptmelt",
-    version="0.1.0",
+    version="0.1.1",
     description="PyTorch Machine Learning Toolbox (PT-MELT)",
     url="https://github.com/NREL/pt-melt",
     author="Nicholas T. Wimer",
     author_email="nwimer@nrel.gov",
     license="BSD 3-Clause License",
-    packages=["ptmelt"],
+    packages=find_packages(),
     install_requires=install_requires,
     classifiers=[
         "Development Status :: 1 - Planning",

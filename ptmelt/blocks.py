@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from ptmelt.layers import MELTBatchNorm
-from ptmelt.utils import get_activation, get_initializer
+from ptmelt.nn_utils import get_activation, get_initializer
 
 
 class MELTBlock(nn.Module):
@@ -243,3 +243,61 @@ class DefaultOutput(nn.Module):
         x = self.activation_layer(x)
 
         return x
+
+
+class MixtureDensityOutput(nn.Module):
+    def __init__(
+        self,
+        input_features: int,
+        num_mixtures: int,
+        num_outputs: int,
+        activation: Optional[str] = "linear",
+        initializer: Optional[str] = "glorot_uniform",
+        **kwargs: Any,
+    ):
+        super(MixtureDensityOutput, self).__init__(**kwargs)
+
+        self.input_features = input_features
+        self.num_mixtures = num_mixtures
+        self.num_outputs = num_outputs
+        self.activation = activation
+        self.initializer = initializer
+
+        # Get the initializer function
+        self.initializer_fn = get_initializer(self.initializer)
+
+        # Initialize output layers
+        self.mix_coeffs_layer = nn.Linear(
+            in_features=self.input_features, out_features=self.num_mixtures
+        )
+        self.mean_layer = nn.Linear(
+            in_features=self.input_features,
+            out_features=self.num_mixtures * self.num_outputs,
+        )
+        self.log_var_layer = nn.Linear(
+            in_features=self.input_features,
+            out_features=self.num_mixtures * self.num_outputs,
+        )
+
+        # Initialize the weights
+        self.initializer_fn(self.mix_coeffs_layer.weight)
+        self.initializer_fn(self.mean_layer.weight)
+        self.initializer_fn(self.log_var_layer.weight)
+
+        # Initialize activation layer
+        self.activation_layer = get_activation(self.activation)
+        self.softmax_layer = get_activation("softmax")
+
+    def forward(self, inputs: torch.Tensor):
+        """Perform the forward pass of the multiple mixture output layer."""
+        mix_coeffs = self.mix_coeffs_layer(inputs)
+        mix_coeffs = self.softmax_layer(mix_coeffs)
+
+        mean = self.mean_layer(inputs)
+        mean = self.activation_layer(mean)
+
+        log_var = self.log_var_layer(inputs)
+        log_var = self.activation_layer(log_var)
+
+        # return concatenated output
+        return torch.cat([mix_coeffs, mean, log_var], dim=-1)
