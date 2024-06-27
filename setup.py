@@ -2,13 +2,15 @@ import platform
 
 from setuptools import find_packages, setup
 
-install_requires = ["pytest", "tqdm"]
+install_requires = ["pytest", "tqdm", "scikit-learn", "matplotlib"]
 print(f"Platform: {platform.system()}")
 
 if platform.system() == "Linux":
     print(f"Installing PyTorch with GPU support for {platform.system()}")
     # Install PyTorch with GPU support
-    pass
+    install_requires.append("torch")
+    install_requires.append("torchvision")
+    install_requires.append("torchaudio")
 elif platform.system() == "Darwin":
     # Install PyTorch for Mac
     install_requires.append("torch")
