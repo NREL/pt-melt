@@ -9,6 +9,25 @@ from ptmelt.nn_utils import get_activation, get_initializer
 
 
 class MELTBlock(nn.Module):
+    """
+    Base class for a MELT block. Provides the building blocks for the MELT architecture.
+    Defines the common parameters for the MELT blocks with optional activation, dropout,
+    batch normalization, and batch renormalization layers.
+
+    Args:
+        input_features (int): Number of input features.
+        node_list (List[int]): List of number of nodes in each layer.
+        activation (str, optional): Activation function. Defaults to "relu".
+        dropout (float, optional): Dropout rate. Defaults to 0.0.
+        batch_norm (bool, optional): Whether to use batch normalization. Defaults to
+                                     False.
+        batch_norm_type (str, optional): Type of batch normalization. Defaults to "ema".
+        use_batch_renorm (bool, optional): Whether to use batch renormalization.
+                                           Defaults to False.
+        initializer (str, optional): Weight initializer. Defaults to "glorot_uniform".
+        **kwargs: Additional keyword arguments.
+    """
+
     def __init__(
         self,
         input_features: int,
@@ -95,6 +114,14 @@ class MELTBlock(nn.Module):
 
 
 class DenseBlock(MELTBlock):
+    """
+    Dense block for the MELT architecture. The dense block consists of dense layers
+    with optional activation, dropout, and batch normalization layers.
+
+    Args:
+        **kwargs: Additional keyword arguments.
+    """
+
     def __init__(
         self,
         **kwargs: Any,
@@ -134,6 +161,22 @@ class DenseBlock(MELTBlock):
 
 
 class ResidualBlock(MELTBlock):
+    """
+    Residual block for the MELT architecture. The residual block consists of residual
+    connections between dense layers with optional activation, dropout, and batch
+    normalization layers. Residual connections are added after every `layers_per_block`
+    layers.
+
+    Args:
+        layers_per_block (int, optional): Number of layers per residual block. Defaults
+                                          to 2.
+        pre_activation (bool, optional): Whether to use pre-activation residual blocks.
+                                         Defaults to False.
+        post_add_activation (bool, optional): Whether to use post-addition activation.
+                                              Defaults to False.
+        **kwargs: Additional keyword arguments.
+    """
+
     def __init__(
         self,
         layers_per_block: Optional[int] = 2,
@@ -209,6 +252,17 @@ class ResidualBlock(MELTBlock):
 
 
 class DefaultOutput(nn.Module):
+    """
+    Default output layer with a single dense layer and optional activation function.
+
+    Args:
+        input_features (int): Number of input features.
+        output_features (int): Number of output features.
+        activation (str, optional): Activation function. Defaults to "linear".
+        initializer (str, optional): Weight initializer. Defaults to "glorot_uniform".
+        **kwargs: Additional keyword arguments.
+    """
+
     def __init__(
         self,
         input_features: int,
@@ -246,6 +300,20 @@ class DefaultOutput(nn.Module):
 
 
 class MixtureDensityOutput(nn.Module):
+    """
+    Output layer for mixture density networks. The output layer consists of three
+    dense layers for the mixture coefficients, mean, and log variance of the output
+    distribution.
+
+    Args:
+        input_features (int): Number of input features.
+        num_mixtures (int): Number of mixture components.
+        num_outputs (int): Number of output dimensions.
+        activation (str, optional): Activation function. Defaults to "linear".
+        initializer (str, optional): Weight initializer. Defaults to "glorot_uniform".
+        **kwargs: Additional keyword arguments.
+    """
+
     def __init__(
         self,
         input_features: int,

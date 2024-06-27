@@ -14,7 +14,6 @@ class MixtureDensityLoss(torch.nn.Module):
     Args:
         num_mixtures (int): Number of mixture components.
         num_outputs (int): Number of output dimensions.
-        variance_scale (float): Scaling factor for the variance loss.
     """
 
     def __init__(self, num_mixtures, num_outputs):

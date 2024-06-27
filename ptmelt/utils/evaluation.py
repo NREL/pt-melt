@@ -12,6 +12,19 @@ def make_predictions(
     unnormalize: Optional[bool] = False,
     training: Optional[bool] = False,
 ):
+    """
+    Make predictions using the provided model and optionally unscaling the results.
+
+    Args:
+        model (torch.nn.Module): A PyTorch model.
+        x_data (np.ndarray or torch.Tensor): Input data.
+        y_normalizer (scaler, optional): Scikit-learn like scaler object. Defaults to
+                                         None.
+        unnormalize (bool, optional): Whether to unnormalize the predictions. Defaults
+                                      to False.
+        training (bool, optional): Whether to use training mode for making predictions.
+                                   Defaults to False.
+    """
     # Set model to either training or evaluation mode
     model.train() if training else model.eval()
 
@@ -74,6 +87,23 @@ def ensemble_predictions(
     n_iter: Optional[int] = 100,
     training: Optional[bool] = False,
 ):
+    """
+    Make ensemble predictions using the provided model and optionally unscaling the
+    results. The ensemble predictions are computed by making multiple predictions and
+    calculating the mean and standard deviation of the predictions.
+
+    Args:
+        model (torch.nn.Module): A PyTorch model.
+        x_data (np.ndarray or torch.Tensor): Input data.
+        y_normalizer (scaler, optional): Scikit-learn like scaler object. Defaults to
+                                         None.
+        unnormalize (bool, optional): Whether to unnormalize the predictions. Defaults
+                                      to False.
+        n_iter (int, optional): Number of iterations for making predictions. Defaults
+                                to 100.
+        training (bool, optional): Whether to use training mode for making predictions.
+                                   Defaults to False.
+    """
     # Set model to either training or evaluation mode
     model.train() if training else model.eval()
 

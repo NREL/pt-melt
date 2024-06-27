@@ -16,22 +16,28 @@ class MELTModel(nn.Module):
     Args:
         num_features (int): The number of input features.
         num_outputs (int): The number of output units.
-        width (int, optional): The width of the hidden layers.
-        depth (int, optional): The number of hidden layers.
-        act_fun (str, optional): The activation function to use.
-        dropout (float, optional): The dropout rate.
-        input_dropout (float, optional): The input dropout rate.
-        batch_norm (bool, optional): Whether to use batch normalization.
+        width (int, optional): The width of the hidden layers. Defaults to 32.
+        depth (int, optional): The number of hidden layers. Defaults to 2.
+        act_fun (str, optional): The activation function to use. Defaults to 'relu'.
+        dropout (float, optional): The dropout rate. Defaults to 0.0.
+        input_dropout (float, optional): The input dropout rate. Defaults to 0.0.
+        batch_norm (bool, optional): Whether to use batch normalization. Defaults to
+                                     False.
         batch_norm_type (str, optional): The type of batch normalization to use.
+                                         Defaults to 'ema'.
         use_batch_renorm (bool, optional): Whether to use batch renormalization.
+                                           Defaults to False.
         output_activation (str, optional): The activation function for the output layer.
-        initializer (str, optional): The weight initializer to use.
-        l1_reg (float, optional): The L1 regularization strength.
-        l2_reg (float, optional): The L2 regularization strength.
-        num_mixtures (int, optional): The number of mixture components for MDN.
-        node_list (list, optional): The list of nodes per layer.
+                                           Defaults to None.
+        initializer (str, optional): The weight initializer to use. Defaults to
+                                     'glorot_uniform'.
+        l1_reg (float, optional): The L1 regularization strength. Defaults to 0.0.
+        l2_reg (float, optional): The L2 regularization strength. Defaults to 0.0.
+        num_mixtures (int, optional): The number of mixture components for MDN. Defaults
+                                      to 0.
+        node_list (list, optional): The list of nodes per layer to alternately define
+                                    layers. Defaults to None.
         **kwargs: Additional keyword arguments.
-
     """
 
     def __init__(
@@ -134,8 +140,13 @@ class MELTModel(nn.Module):
         """Compute the Jacobian of the model with respect to the input."""
         pass
 
-    def l1_regularization(self, lambda_l1):
-        """Compute the L1 regularization term for use in the loss function."""
+    def l1_regularization(self, lambda_l1: float):
+        """
+        Compute the L1 regularization term for use in the loss function.
+
+        Args:
+            lambda_l1 (float): The L1 regularization strength.
+        """
         l1_norm = sum(
             p.abs().sum()
             for name, p in self.named_parameters()
@@ -143,8 +154,13 @@ class MELTModel(nn.Module):
         )
         return lambda_l1 * l1_norm
 
-    def l2_regularization(self, lambda_l2):
-        """Compute the L2 regularization term for use in the loss function."""
+    def l2_regularization(self, lambda_l2: float):
+        """
+        Compute the L2 regularization term for use in the loss function.
+
+        Args:
+            lambda_l2 (float): The L2 regularization strength.
+        """
         l2_norm = sum(
             p.pow(2.0).sum()
             for name, p in self.named_parameters()
@@ -155,7 +171,14 @@ class MELTModel(nn.Module):
     def get_loss_fn(
         self, loss: Optional[str] = "mse", reduction: Optional[str] = "mean"
     ):
-        """Get the loss function for the model."""
+        """
+        Get the loss function for the model. Used in the training loop.
+
+        Args:
+            loss (str, optional): The loss function to use. Defaults to 'mse'.
+            reduction (str, optional): The reduction method for the loss. Defaults to
+                                       'mean'.
+        """
         if self.num_mixtures > 0:
             warnings.warn(
                 "Mixture Density Networks require the use of the MixtureDensityLoss "
@@ -170,8 +193,17 @@ class MELTModel(nn.Module):
         else:
             raise ValueError(f"Loss function {loss} not recognized.")
 
-    def fit(self, train_dl, val_dl, optimizer, criterion, num_epochs):
-        """Perform the model training loop."""
+    def fit(self, train_dl, val_dl, optimizer, criterion, num_epochs: int):
+        """
+        Perform the model training loop.
+
+        Args:
+            train_dl (DataLoader): The training data loader.
+            val_dl (DataLoader): The validation data loader.
+            optimizer (Optimizer): The optimizer to use.
+            criterion (Loss): The loss function to use.
+            num_epochs (int): The number of epochs to train the model.
+        """
 
         # Create history dictionary
         if not hasattr(self, "history"):
@@ -266,8 +298,13 @@ class ArtificialNeuralNetwork(MELTModel):
         )
         self.sub_layer_names.append("dense_block")
 
-    def forward(self, inputs):
-        """Perform the forward pass of the ANN."""
+    def forward(self, inputs: torch.Tensor):
+        """
+        Perform the forward pass of the ANN.
+
+        Args:
+            inputs (torch.Tensor): The input data.
+        """
         # Apply input dropout
         x = (
             self.layer_dict["input_dropout"](inputs)
@@ -288,9 +325,11 @@ class ResidualNeuralNetwork(MELTModel):
 
     Args:
         layers_per_block (int, optional): The number of layers per residual block.
-        pre_activation (bool, optional): Whether to use pre-activation.
+                                          Defaults to 2.
+        pre_activation (bool, optional): Whether to use pre-activation. Defaults to
+                                         True.
         post_add_activation (bool, optional): Whether to use activation after
-                                              addition.
+                                              addition. Defaults to False.
         **kwargs: Additional keyword arguments.
 
     """
@@ -344,8 +383,13 @@ class ResidualNeuralNetwork(MELTModel):
         )
         self.sub_layer_names.append("residual_block")
 
-    def forward(self, inputs):
-        """Perform the forward pass of the ResNet."""
+    def forward(self, inputs: torch.Tensor):
+        """
+        Perform the forward pass of the ResNet.
+
+        Args:
+            inputs (torch.Tensor): The input data.
+        """
         # Apply input dropout
         x = (
             self.layer_dict["input_dropout"](inputs)

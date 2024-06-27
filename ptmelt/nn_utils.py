@@ -1,8 +1,13 @@
 import torch.nn as nn
 
 
-def get_activation(act_name):
-    """Utility method to get activation based on its name."""
+def get_activation(act_name: str):
+    """
+    Utility method to get activation based on its name.
+
+    Args:
+        act_name (str): Name of the activation function.
+    """
     if act_name == "relu":
         return nn.ReLU()
     elif act_name == "sigmoid":
@@ -17,7 +22,7 @@ def get_activation(act_name):
         raise ValueError(f"Unsupported activation function {act_name}")
 
 
-def get_initializer(init_name):
+def get_initializer(init_name: str):
     """Utility method to get initializer based on its name."""
     if init_name == "glorot_uniform":
         return nn.init.xavier_uniform_
