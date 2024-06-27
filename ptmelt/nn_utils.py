@@ -9,8 +9,10 @@ def get_activation(act_name):
         return nn.Sigmoid()
     elif act_name == "tanh":
         return nn.Tanh()
-    elif act_name == "linear":
+    elif act_name == "linear" or act_name is None:
         return nn.Identity()
+    elif act_name == "softmax":
+        return nn.Softmax(dim=-1)
     else:
         raise ValueError(f"Unsupported activation function {act_name}")
 
