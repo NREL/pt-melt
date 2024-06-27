@@ -2,10 +2,26 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class MELTBatchNorm(nn.Module):
+    """
+    Custom Batch Normalization Layer for PT-MELT.
+
+    Supports implementation of different types of moving averages for the batch norm
+    statistics.
+
+    Args:
+        num_features (int): Number of features in the input tensor.
+        eps (float, optional): Small value to avoid division by zero.
+                               Defaults to 1e-5.
+        momentum (float, optional): Momentum for moving average. Defaults to 0.1.
+        affine (bool, optional): Apply affine transformation. Defaults to True.
+        track_running_stats (bool, optional): Track running statistics. Defaults to
+                                              True.
+        average_type (str, optional): Type of moving average. Defaults to "ema".
+    """
+
     def __init__(
         self,
         num_features: int,
@@ -17,20 +33,6 @@ class MELTBatchNorm(nn.Module):
     ):
         # TODO: Check that all features of PyTorch BatchNorm are implemented.
 
-        """
-        Custom Batch Normalization Layer for PT-MELT.
-
-        Supports implementation of different types of moving averages for the batch norm
-        statistics.
-
-        Args:
-            num_features (int): Number of features in the input tensor.
-            eps (float, optional): Small value to avoid division by zero.
-            momentum (float, optional): Momentum for moving average.
-            affine (bool, optional): Apply affine transformation.
-            track_running_stats (bool, optional): Track running statistics.
-            average_type (str, optional): Type of moving average.
-        """
         super(MELTBatchNorm, self).__init__()
 
         self.num_features = num_features
@@ -75,8 +77,13 @@ class MELTBatchNorm(nn.Module):
             self.weight = None
             self.bias = None
 
-    def forward(self, input):
-        """Perform the forward pass of the batch normalization layer."""
+    def forward(self, input: torch.Tensor):
+        """
+        Perform the forward pass of the batch normalization layer.
+
+        Args:
+            input (torch.Tensor): Input tensor to be normalized.
+        """
         # Calculate Batch Norm Statistics
         if self.training:
             mean = input.mean(dim=0)
@@ -114,35 +121,38 @@ class MELTBatchNorm(nn.Module):
 
 
 class MELTBatchRenorm(MELTBatchNorm):
+    """
+    Custom Batch Renormalization Layer for PT-MELT.
+
+    Supports implementation of different types of moving averages for the batch norm
+    statistics.
+
+    Args:
+        num_features (int): Number of features in the input tensor.
+        eps (float, optional): Small value to avoid division by zero. Defaults to
+                               1e-5.
+        momentum (float, optional): Momentum for moving average. Defaults to 0.1.
+        affine (bool, optional): Apply affine transformation. Defaults to True.
+        track_running_stats (bool, optional): Track running statistics. Defaults to
+                                              True.
+        average_type (str, optional): Type of moving average. Defaults to "ema".
+        rmax (float, optional): Maximum value for r. Defaults to 1.0.
+        dmax (float, optional): Maximum value for d. Defaults to 0.0.
+    """
+
     def __init__(
         self,
-        num_features,
-        eps=1e-5,
-        momentum=0.1,
-        affine=True,
-        track_running_stats=True,
-        average_type="ema",
-        rmax=1,
-        dmax=0,
+        num_features: int,
+        eps: Optional[float] = 1e-5,
+        momentum: Optional[float] = 0.1,
+        affine: Optional[bool] = True,
+        track_running_stats: Optional[bool] = True,
+        average_type: Optional[str] = "ema",
+        rmax: Optional[float] = 1.0,
+        dmax: Optional[float] = 0.0,
     ):
         # TODO: Verify accuracy of renorm implementation.
 
-        """
-        Custom Batch Renormalization Layer for PT-MELT.
-
-        Supports implementation of different types of moving averages for the batch norm
-        statistics.
-
-        Args:
-            num_features (int): Number of features in the input tensor.
-            eps (float, optional): Small value to avoid division by zero.
-            momentum (float, optional): Momentum for moving average.
-            affine (bool, optional): Apply affine transformation.
-            track_running_stats (bool, optional): Track running statistics.
-            average_type (str, optional): Type of moving average.
-            rmax (float, optional): Maximum value for r.
-            dmax (float, optional): Maximum value for d.
-        """
         super().__init__(
             num_features, eps, momentum, affine, track_running_stats, average_type
         )
@@ -151,7 +161,7 @@ class MELTBatchRenorm(MELTBatchNorm):
         self.register_buffer("r", torch.ones(1))
         self.register_buffer("d", torch.zeros(1))
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor):
         """Perform the forward pass of the batch renormalization layer."""
         # Calculate Batch Norm Statistics
         if self.training:
