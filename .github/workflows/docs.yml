@@ -51,7 +51,7 @@ jobs:
       - name: Set TARGET_FOLDER and CLEAN
         run: |
           if [ "${{ github.event_name }}" == "push" ] && [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            echo "TARGET_FOLDER=docs/" >> $GITHUB_ENV
+            echo "TARGET_FOLDER=/" >> $GITHUB_ENV
             echo "CLEAN=true" >> $GITHUB_ENV
           elif [ "${{ github.event_name }}" == "pull_request" ] && [ "${{ github.event.action }}" == "closed" ]; then
             echo "TARGET_FOLDER=pr-preview/${{ github.event.number }}" >> $GITHUB_ENV
