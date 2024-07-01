@@ -64,8 +64,8 @@ jobs:
       - name: Stage Cleanup for _downloads directory (files older than 10 days)
         if: github.event_name == 'pull_request' && github.event.action == 'closed'
         run: |
-          find _downloads -type f -mtime +10 -delete
-          git add _downloads
+          find _downloads -type f -mtime +10 -delete || true
+          git add _downloads || true
 
       - name: Deploy
         uses: JamesIves/github-pages-deploy-action@releases/v4
