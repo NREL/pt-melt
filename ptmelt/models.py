@@ -6,7 +6,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from ptmelt.blocks import DefaultOutput, DenseBlock, MixtureDensityOutput, ResidualBlock
-from ptmelt.losses import MixtureDensityLoss
+from ptmelt.losses import MixtureDensityLoss, VAELoss
 
 
 class MELTModel(nn.Module):
@@ -179,7 +179,7 @@ class MELTModel(nn.Module):
             reduction (str, optional): The reduction method for the loss. Defaults to
                                        'mean'.
         """
-        if self.num_mixtures > 0:
+        if self.special_loss == "mdn":
             warnings.warn(
                 "Mixture Density Networks require the use of the MixtureDensityLoss "
                 "class. The loss function will be set to automatically."
@@ -188,6 +188,14 @@ class MELTModel(nn.Module):
             return MixtureDensityLoss(
                 num_mixtures=self.num_mixtures, num_outputs=self.num_outputs
             )
+        elif self.special_loss == "vae":
+            warnings.warn(
+                "Variational Autoencoders require the use of the VAELoss class. The "
+                "loss function will be set to automatically."
+            )
+
+            return VAELoss()
+
         elif loss == "mse":
             return nn.MSELoss(reduction=reduction)
         else:
@@ -277,6 +285,9 @@ class ArtificialNeuralNetwork(MELTModel):
     ):
         super(ArtificialNeuralNetwork, self).__init__(**kwargs)
 
+        if self.num_mixtures > 0:
+            self.special_loss = "mdn"
+
     def initialize_layers(self):
         """Initialize the layers of the ANN."""
         super(ArtificialNeuralNetwork, self).initialize_layers()
@@ -347,6 +358,9 @@ class ResidualNeuralNetwork(MELTModel):
         self.pre_activation = pre_activation
         self.post_add_activation = post_add_activation
 
+        if self.num_mixtures > 0:
+            self.special_loss = "mdn"
+
     def build(self):
         """Build the model."""
         if self.depth % self.layers_per_block != 0:
@@ -402,3 +416,139 @@ class ResidualNeuralNetwork(MELTModel):
 
         # Apply the output layer(s) and return
         return self.layer_dict["output"](x)
+
+
+class VariationalAutoEncoder(MELTModel):
+    def __init__(
+        self,
+        encode_node_list: Optional[list] = [32, 32],
+        decode_node_list: Optional[list] = [32, 32],
+        latent_dim: Optional[int] = 2,
+        **kwargs,
+    ):
+        super(VariationalAutoEncoder, self).__init__(**kwargs)
+
+        self.encode_node_list = encode_node_list
+        self.decode_node_list = decode_node_list
+        self.latent_dim = latent_dim
+
+        self.special_loss = "vae"
+
+    def initialize_layers(self):
+        # super(VariationalAutoEncoder, self).initialize_layers()
+
+        # Create the encoder dense block
+        self.layer_dict.update(
+            {
+                "encoder_dense": DenseBlock(
+                    input_features=self.num_features,
+                    node_list=self.encode_node_list,
+                    activation=self.act_fun,
+                    dropout=self.dropout,
+                    batch_norm=self.batch_norm,
+                    batch_norm_type=self.batch_norm_type,
+                    use_batch_renorm=self.use_batch_renorm,
+                    initializer=self.initializer,
+                )
+            }
+        )
+        self.sub_layer_names.append("encoder_dense")
+
+        # Create the latent layer
+        self.layer_dict.update(
+            {
+                "encoder_output": MixtureDensityOutput(
+                    input_features=self.encode_node_list[-1],
+                    num_mixtures=self.num_mixtures,
+                    num_outputs=self.latent_dim,
+                    activation=self.output_activation,
+                    initializer=self.initializer,
+                )
+            }
+        )
+        self.sub_layer_names.append("encoder_output")
+
+        # Create the decoder
+        self.layer_dict.update(
+            {
+                "decoder": DenseBlock(
+                    input_features=self.latent_dim,
+                    node_list=self.decode_node_list,
+                    activation=self.act_fun,
+                    dropout=self.dropout,
+                    batch_norm=self.batch_norm,
+                    batch_norm_type=self.batch_norm_type,
+                    use_batch_renorm=self.use_batch_renorm,
+                    initializer=self.initializer,
+                )
+            }
+        )
+        self.sub_layer_names.append("decoder")
+
+        # Create the output layer
+        self.layer_dict.update(
+            {
+                "output": DefaultOutput(
+                    input_features=self.decode_node_list[-1],
+                    output_features=self.num_features,
+                    activation=self.output_activation,
+                    initializer=self.initializer,
+                )
+            }
+        )
+        self.sub_layer_names.append("output")
+
+    def forward(self, inputs: torch.Tensor):
+        # First apply the encoder
+
+        # input dropout before the encoder
+        x = (
+            self.layer_dict["input_dropout"](inputs)
+            if self.input_dropout > 0
+            else inputs
+        )
+
+        # Apply the encoder dense block
+        x = self.layer_dict["encoder_dense"](x)
+
+        # Apply the encoder output layer to get the latent representation
+        x = self.layer_dict["encoder_output"](x)
+        # print(f"Encoder output shape: {x.shape}")
+
+        # separate the outputs from the MDN layer into components and construct the latent representation
+        m_coeffs = x[:, : self.num_mixtures]
+        mean_preds = x[
+            :,
+            self.num_mixtures : self.num_mixtures + self.num_mixtures * self.latent_dim,
+        ]
+        log_var_preds = x[:, self.num_mixtures + self.num_mixtures * self.latent_dim :]
+
+        # Normalize the mixture coefficients so they sum to 1 (though they should already)
+        m_coeffs = torch.nn.functional.softmax(m_coeffs, dim=1)
+
+        # Sample a component from the mixture
+        component = torch.multinomial(m_coeffs, num_samples=1)
+        # print(f"Shape of component: {component.shape}")
+        # Expand the size of component to be (batch_size, latent_dim)
+        component = component.expand(-1, self.latent_dim)
+        # print(f"Shape of component after view: {component.shape}")
+
+        # Extract the mean and log-variance for the selected component
+        mean = mean_preds.gather(1, component).squeeze(1)
+        log_var = log_var_preds.gather(1, component).squeeze(1)
+
+        # Sample from the Gaussian distribution
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        # z = eps.mul(std).add_(mean)
+        z = mean + eps * std
+
+        # Apply the decoder
+        # print(f"Shape of z: {z.shape}")
+        recon_x = self.layer_dict["decoder"](z)
+
+        # Apply the output layer
+        out = self.layer_dict["output"](recon_x)
+
+        # Return reconstructed input, mean, and log-variance
+        return out, mean, log_var
