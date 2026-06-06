@@ -40,6 +40,50 @@ class AttentionPool(nn.Module):
         return pooled
 
 
+class PositionalEncoding(nn.Module):
+    """
+    Sinusoidal positional encoding for sequence models using batch-first tensors.
+
+    Args:
+        d_model (int): The embedding dimension.
+        max_len (int, optional): Maximum sequence length supported.
+        dropout (float, optional): Dropout applied after adding position encodings.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        max_len: Optional[int] = 2048,
+        dropout: Optional[float] = 0.0,
+    ):
+        super().__init__()
+
+        self.d_model = d_model
+        self.max_len = max_len
+        self.dropout = nn.Dropout(dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model)
+        )
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
+        self.register_buffer("pe", pe)
+
+    def forward(self, input_tensor: torch.Tensor):
+        """Add positional encodings to a batch-first tensor [B, T, D]."""
+        sequence_length = input_tensor.size(1)
+        if sequence_length > self.max_len:
+            raise ValueError(
+                f"Sequence length {sequence_length} exceeds maximum {self.max_len}."
+            )
+
+        output = input_tensor + self.pe[:, :sequence_length, :]
+        return self.dropout(output)
+
+
 class MELTBayesianDenseFlipOut(nn.Module):
     """
     Custom Bayesian Layer for PT-MELT.

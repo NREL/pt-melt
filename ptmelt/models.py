@@ -9,7 +9,14 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from tqdm import tqdm
 
-from ptmelt.blocks import DefaultOutput, DenseBlock, MixtureDensityOutput, ResidualBlock
+from ptmelt.blocks import (
+    BayesianBlock,
+    DefaultOutput,
+    DenseBlock,
+    MixtureDensityOutput,
+    ResidualBlock,
+    TransformerEncoderBlock,
+)
 from ptmelt.layers import AttentionPool, Reparameterization
 from ptmelt.losses import MixtureDensityLoss, VAELoss
 
@@ -1167,6 +1174,206 @@ class RecurrentNeuralNetwork(MELTModel):
                 running_loss += loss.item()
 
         # Normalize loss
+        running_loss /= len(dataloader)
+        return running_loss
+
+
+class TemporalTransformerNetwork(MELTModel):
+    """
+    Temporal Transformer model for sequence-to-one forecasting.
+
+    Args:
+        num_heads (int, optional): Number of attention heads.
+        ff_dim (int, optional): Feed-forward hidden dimension in encoder layers.
+        max_seq_len (int, optional): Maximum supported sequence length.
+        head_type (str, optional): Sequence pooling strategy. One of: last, attn, mean, max.
+        use_causal_mask (bool, optional): Whether to apply causal attention masking.
+        **kwargs: Additional MELTModel keyword arguments.
+    """
+
+    def __init__(
+        self,
+        num_heads: Optional[int] = 4,
+        ff_dim: Optional[int] = None,
+        max_seq_len: Optional[int] = 2048,
+        head_type: Optional[str] = "last",
+        use_causal_mask: Optional[bool] = False,
+        **kwargs,
+    ):
+        super(TemporalTransformerNetwork, self).__init__(**kwargs)
+
+        if self.depth is None or self.depth <= 0:
+            raise ValueError("depth must be a positive integer for transformer models.")
+        if self.width is None or self.width <= 0:
+            raise ValueError("width must be a positive integer for transformer models.")
+        if self.width % num_heads != 0:
+            raise ValueError("width must be divisible by num_heads.")
+
+        if self.node_list is not None:
+            warnings.warn(
+                "Warning: node_list is ignored by TemporalTransformerNetwork; "
+                "using width and depth settings."
+            )
+
+        self.num_heads = num_heads
+        self.ff_dim = ff_dim
+        self.max_seq_len = max_seq_len
+        self.use_causal_mask = use_causal_mask
+
+        self.hidden_size = self.width
+        self.num_layers = self.depth
+        self.transformer_out_dim = self.hidden_size
+
+        self.head_type = head_type.lower()
+        if self.head_type not in ["last", "attn", "mean", "max"]:
+            raise ValueError("head_type must be one of: 'last', 'attn', 'mean', 'max'.")
+
+    def create_output_layer(self):
+        """Override to use transformer_out_dim as output head input width."""
+        if self.num_mixtures > 0:
+            head = MixtureDensityOutput(
+                input_features=self.transformer_out_dim,
+                num_mixtures=self.num_mixtures,
+                num_outputs=self.num_outputs,
+                activation=self.output_activation,
+                initializer=self.initializer,
+                seed=self.seed,
+            )
+        else:
+            head = DefaultOutput(
+                input_features=self.transformer_out_dim,
+                output_features=self.num_outputs,
+                activation=self.output_activation,
+                initializer=self.initializer,
+                seed=self.seed,
+            )
+
+        self.layer_dict.update({"output": head})
+        self.sub_layer_names.append("output")
+
+    def initialize_layers(self):
+        """Initialize dropout, transformer encoder, and output layers."""
+        super(TemporalTransformerNetwork, self).initialize_layers()
+
+        self.layer_dict.update(
+            {
+                "transformer_block": TransformerEncoderBlock(
+                    input_features=self.num_features,
+                    model_dim=self.hidden_size,
+                    num_layers=self.num_layers,
+                    num_heads=self.num_heads,
+                    ff_dim=self.ff_dim,
+                    activation=self.act_fun,
+                    dropout=self.dropout,
+                    max_seq_len=self.max_seq_len,
+                    use_causal_mask=self.use_causal_mask,
+                    initializer=self.initializer,
+                    seed=self.seed,
+                )
+            }
+        )
+        self.sub_layer_names.append("transformer_block")
+
+        if self.head_type == "attn":
+            self.layer_dict["pool_head"] = AttentionPool(self.hidden_size)
+        else:
+            self.layer_dict["pool_head"] = None
+
+    def _select_last_timestep(self, transformer_out, lengths):
+        """Select the last valid timestep for each sequence in the batch."""
+        batch_size, _, features = transformer_out.size()
+        idx = (lengths - 1).view(-1, 1).expand(batch_size, features).unsqueeze(1)
+        return transformer_out.gather(1, idx).squeeze(1)
+
+    def _compute_mean_timestep(self, transformer_out, lengths):
+        """Compute mean over valid timesteps for each sequence."""
+        batch_size, time_steps, _ = transformer_out.size()
+        mask = (
+            torch.arange(time_steps, device=transformer_out.device)
+            .unsqueeze(0)
+            .expand(batch_size, time_steps)
+            < lengths.unsqueeze(1)
+        ).float()
+        summed = (transformer_out * mask.unsqueeze(-1)).sum(dim=1)
+        counts = mask.sum(dim=1).clamp_min(1.0).unsqueeze(-1)
+        return summed / counts
+
+    def _compute_max_timestep(self, transformer_out, lengths):
+        """Compute max over valid timesteps for each sequence."""
+        batch_size, time_steps, _ = transformer_out.size()
+        mask = torch.arange(time_steps, device=transformer_out.device).unsqueeze(
+            0
+        ).expand(batch_size, time_steps) < lengths.unsqueeze(1)
+        masked = transformer_out.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        return masked.max(dim=1).values
+
+    def forward(self, inputs: torch.Tensor, lengths: Optional[torch.Tensor] = None):
+        """Perform forward pass for sequence-to-one forecasting."""
+        x = (
+            self.layer_dict["input_dropout"](inputs)
+            if self.input_dropout > 0
+            else inputs
+        )
+
+        transformer_out = self.layer_dict["transformer_block"](x, lengths=lengths)
+
+        if self.head_type == "attn":
+            features = self.layer_dict["pool_head"](transformer_out, lengths=lengths)
+        elif self.head_type == "mean":
+            if lengths is None:
+                features = transformer_out.mean(dim=1)
+            else:
+                features = self._compute_mean_timestep(transformer_out, lengths)
+        elif self.head_type == "max":
+            if lengths is None:
+                features = transformer_out.max(dim=1).values
+            else:
+                features = self._compute_max_timestep(transformer_out, lengths)
+        else:
+            features = (
+                self._select_last_timestep(transformer_out, lengths)
+                if lengths is not None
+                else transformer_out[:, -1, :]
+            )
+
+        return self.layer_dict["output"](features)
+
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=True, **kwargs
+    ):
+        """Perform one training/validation epoch with optional sequence lengths."""
+        self.train() if training else self.eval()
+
+        context_manager = torch.no_grad() if not training else nullcontext()
+
+        running_loss = 0.0
+        with context_manager:
+            for batch in dataloader:
+                if len(batch) == 3:
+                    x_in, y_in, lengths = batch
+                    lengths = lengths.to(device)
+                else:
+                    x_in, y_in = batch
+                    lengths = None
+
+                x_in, y_in = x_in.to(device), y_in.to(device)
+
+                pred = self(x_in, lengths=lengths)
+                loss = criterion(pred, y_in)
+
+                if training:
+                    if self.l1_reg > 0:
+                        loss += self.l1_regularization(lambda_l1=self.l1_reg)
+                    if self.l2_reg > 0:
+                        loss += self.l2_regularization(lambda_l2=self.l2_reg)
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                    optimizer.step()
+
+                running_loss += loss.item()
+
         running_loss /= len(dataloader)
         return running_loss
 
