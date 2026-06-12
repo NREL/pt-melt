@@ -94,6 +94,7 @@ class MELTModel(nn.Module):
         self.seed = seed
 
         self.custom_loss = None
+        self.min_lr = None
 
         # Determine if network should be defined based on depth/width or node_list
         if self.node_list:
@@ -1376,6 +1377,239 @@ class TemporalTransformerNetwork(MELTModel):
 
         running_loss /= len(dataloader)
         return running_loss
+
+
+class ForecastEnsemble(MELTModel):
+    """
+    Ensemble wrapper for existing MELT models with matching forecasting outputs.
+
+    This class keeps the public MELT-style API while composing already-defined
+    models. The first implementation intentionally stays narrow: all members must
+    share the same input/output contract and currently use deterministic outputs.
+
+    Args:
+        models (List[MELTModel]): Member models to aggregate.
+        aggregation (str, optional): Aggregation strategy. One of: 'mean', 'weighted'.
+        weights (List[float], optional): Optional ensemble weights.
+        **kwargs: Ignored extra keyword arguments for compatibility.
+    """
+
+    def __init__(
+        self,
+        models: List[MELTModel],
+        aggregation: Optional[str] = "mean",
+        weights: Optional[List[float]] = None,
+        **kwargs,
+    ):
+        if not models:
+            raise ValueError("ForecastEnsemble requires at least one member model.")
+
+        reference_model = models[0]
+        super(ForecastEnsemble, self).__init__(
+            num_features=reference_model.num_features,
+            num_outputs=reference_model.num_outputs,
+            width=reference_model.width,
+            depth=reference_model.depth,
+            act_fun=reference_model.act_fun,
+            dropout=reference_model.dropout,
+            input_dropout=reference_model.input_dropout,
+            batch_norm=reference_model.batch_norm,
+            batch_norm_type=reference_model.batch_norm_type,
+            use_batch_renorm=reference_model.use_batch_renorm,
+            output_activation=reference_model.output_activation,
+            initializer=reference_model.initializer,
+            l1_reg=0.0,
+            l2_reg=0.0,
+            num_mixtures=0,
+            node_list=None,
+            seed=reference_model.seed,
+            **kwargs,
+        )
+
+        self.models = nn.ModuleList(models)
+        self.num_members = len(self.models)
+        self.aggregation = aggregation.lower()
+        if self.aggregation not in ["mean", "weighted"]:
+            raise ValueError("aggregation must be one of: 'mean', 'weighted'.")
+
+        self._validate_members()
+        weight_tensor = self._initialize_weights(weights)
+        self.register_buffer("ensemble_weights", weight_tensor)
+
+    def _validate_members(self):
+        """Validate that all member models share the same basic contract."""
+        for model in self.models:
+            if model.num_features != self.num_features:
+                raise ValueError(
+                    "All ensemble members must have the same num_features."
+                )
+            if model.num_outputs != self.num_outputs:
+                raise ValueError("All ensemble members must have the same num_outputs.")
+            if model.num_mixtures > 0:
+                raise NotImplementedError(
+                    "ForecastEnsemble currently supports deterministic member outputs only."
+                )
+
+    def _initialize_weights(self, weights: Optional[List[float]]):
+        """Initialize normalized ensemble weights."""
+        if weights is None:
+            return torch.full((self.num_members,), 1.0 / self.num_members)
+
+        if len(weights) != self.num_members:
+            raise ValueError("weights must match the number of ensemble members.")
+
+        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        if torch.any(weight_tensor < 0):
+            raise ValueError("weights must be non-negative.")
+
+        weight_sum = weight_tensor.sum()
+        if weight_sum <= 0:
+            raise ValueError("weights must sum to a positive value.")
+
+        return weight_tensor / weight_sum
+
+    def build(self):
+        """Build each member model if it has not already been initialized."""
+        for model in self.models:
+            if hasattr(model, "layer_dict") and len(model.layer_dict) == 0:
+                model.build()
+
+    def _forward_member(
+        self, model: MELTModel, inputs: torch.Tensor, lengths: Optional[torch.Tensor]
+    ):
+        """Forward one member while accommodating sequence-aware and plain models."""
+        try:
+            return model(inputs, lengths=lengths)
+        except TypeError:
+            return model(inputs)
+
+    def _aggregate_predictions(self, prediction_stack: torch.Tensor):
+        """Aggregate member predictions into a single ensemble prediction."""
+        if self.aggregation == "mean":
+            return prediction_stack.mean(dim=0)
+
+        weights = self.ensemble_weights.view(-1, 1, 1).to(prediction_stack.device)
+        return (prediction_stack * weights).sum(dim=0)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+        return_member_predictions: Optional[bool] = False,
+    ):
+        """Run each member and aggregate predictions across the ensemble."""
+        member_predictions = [
+            self._forward_member(model, inputs, lengths) for model in self.models
+        ]
+        prediction_stack = torch.stack(member_predictions, dim=0)
+        ensemble_prediction = self._aggregate_predictions(prediction_stack)
+
+        if return_member_predictions:
+            return ensemble_prediction, prediction_stack
+
+        return ensemble_prediction
+
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=False, **kwargs
+    ):
+        """Evaluate ensemble loss; member training is handled by `fit`."""
+        if training:
+            raise NotImplementedError(
+                "ForecastEnsemble does not support joint training with one optimizer. "
+                "Use fit() with one optimizer per member model."
+            )
+
+        self.eval()
+        running_loss = 0.0
+
+        with torch.no_grad():
+            for batch in dataloader:
+                if len(batch) == 3:
+                    x_in, y_in, lengths = batch
+                    lengths = lengths.to(device)
+                else:
+                    x_in, y_in = batch
+                    lengths = None
+
+                x_in, y_in = x_in.to(device), y_in.to(device)
+                pred = self(x_in, lengths=lengths)
+                running_loss += criterion(pred, y_in).item()
+
+        running_loss /= len(dataloader)
+        return running_loss
+
+    def fit(
+        self,
+        train_dl,
+        val_dl,
+        optimizers,
+        criterion,
+        num_epochs: Optional[int] = 100,
+        device: Optional[str] = "cpu",
+        schedulers=None,
+        stopping: Optional[bool] = True,
+        verbose=False,
+        **step_kwargs,
+    ):
+        """Train ensemble members sequentially using member-specific optimizers."""
+        if not isinstance(optimizers, (list, tuple)):
+            raise ValueError(
+                "ForecastEnsemble.fit requires a list or tuple of optimizers, one per member."
+            )
+        if len(optimizers) != self.num_members:
+            raise ValueError("optimizers must match the number of ensemble members.")
+
+        criteria = (
+            list(criterion)
+            if isinstance(criterion, (list, tuple))
+            else [criterion for _ in range(self.num_members)]
+        )
+        if len(criteria) != self.num_members:
+            raise ValueError("criterion must be a single loss or one per member.")
+
+        if schedulers is None:
+            scheduler_list = [None for _ in range(self.num_members)]
+        elif isinstance(schedulers, (list, tuple)):
+            scheduler_list = list(schedulers)
+        else:
+            scheduler_list = [schedulers for _ in range(self.num_members)]
+
+        if len(scheduler_list) != self.num_members:
+            raise ValueError("schedulers must match the number of ensemble members.")
+
+        self.build()
+        self.history = {"member_histories": [], "val_loss": []}
+
+        for model, optimizer, member_criterion, scheduler in zip(
+            self.models, optimizers, criteria, scheduler_list
+        ):
+            model.min_lr = getattr(model, "min_lr", None)
+            model.fit(
+                train_dl,
+                val_dl,
+                optimizer,
+                member_criterion,
+                num_epochs=num_epochs,
+                device=device,
+                scheduler=scheduler,
+                stopping=stopping,
+                verbose=verbose,
+                **step_kwargs,
+            )
+            self.history["member_histories"].append(model.history)
+
+        self.to(device)
+        if val_dl is not None:
+            self.history["val_loss"].append(
+                self.step(
+                    val_dl,
+                    optimizer=None,
+                    criterion=criteria[0],
+                    device=device,
+                    training=False,
+                    **step_kwargs,
+                )
+            )
 
 
 class VariationalAutoencoder(MELTModel):

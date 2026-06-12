@@ -607,7 +607,7 @@ class MixtureDensityOutput(nn.Module):
 
         # Initialize activation layer
         self.activation_layer = _get_activation(self.activation)
-        self.softmax_layer = _get_activation("softmax")
+        self.softmax_layer = nn.Softmax(dim=-1)
 
     def forward(self, inputs: torch.Tensor):
         """Perform the forward pass of the multiple mixture output layer."""
