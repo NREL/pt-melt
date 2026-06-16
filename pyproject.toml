@@ -9,18 +9,16 @@ description = "PyTorch Machine Learning Toolbox (PT-MELT)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "BSD-3-Clause"
-authors = [
-    { name = "Nicholas T. Wimer", email = "nwimer@nrel.gov" },
-]
+authors = [{ name = "Nicholas T. Wimer", email = "nwimer@nrel.gov" }]
 classifiers = [
-    "Development Status :: 1 - Planning",
-    "Intended Audience :: Science/Research",
-    "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     "pytest",
@@ -45,19 +43,9 @@ dependencies = [
 Homepage = "https://github.com/NREL/pt-melt"
 
 [project.optional-dependencies]
-dev = [
-    "ruff",
-    "ipython",
-]
-test = [
-    "pytest",
-    "pytest-cov",
-]
-doc = [
-    "sphinx",
-    "myst-parser",
-    "pydata-sphinx-theme",
-]
+dev = ["ruff", "ipython"]
+test = ["pytest", "pytest-cov"]
+doc = ["sphinx", "myst-parser", "pydata-sphinx-theme"]
 
 [tool.setuptools.packages.find]
 include = ["ptmelt*"]
