@@ -44,5 +44,43 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/NREL/pt-melt"
 
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "ipython",
+]
+test = [
+    "pytest",
+    "pytest-cov",
+]
+doc = [
+    "sphinx",
+    "myst-parser",
+    "pydata-sphinx-theme",
+]
+
 [tool.setuptools.packages.find]
 include = ["ptmelt*"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev", "doc", "test"], solve-group = "default" }
+doc = { features = ["doc"], solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.pypi-dependencies]
+ptmelt = { path = ".", editable = true }
+
+[tool.pixi.feature.dev.tasks]
+lint = "ruff check ./ptmelt"
+format = "ruff format ./ptmelt"
+
+[tool.pixi.feature.test.tasks]
+tests = "pytest -vv ptmelt/"
+
+[tool.pixi.feature.doc.tasks]
+docs = { cmd = "make html", cwd = "Docs" }
