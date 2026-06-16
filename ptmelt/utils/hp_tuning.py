@@ -395,8 +395,8 @@ def _build_search_alg(
     return searcher
 
 
-def _checkpoint_from_directory(train_module: Any, checkpoint_dir: str) -> Any:
-    checkpoint_cls = getattr(train_module, "Checkpoint", None)
+def _checkpoint_from_directory(checkpoint_module: Any, checkpoint_dir: str) -> Any:
+    checkpoint_cls = getattr(checkpoint_module, "Checkpoint", None)
     if checkpoint_cls is None:
         from ray.air import Checkpoint
 
@@ -416,14 +416,27 @@ def _ray_tune_trainable(
     step_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> None:
     ray_core = _require_ray_core()
-    train_module = ray_core["train"]
+    tune_module = ray_core["tune"]
+
+    # Prefer Tune-native APIs when running a Tune function trainable.
+    # Keep fallbacks for older Ray versions where these lived under ray.train.
+    get_checkpoint = getattr(tune_module, "get_checkpoint", None)
+    report = getattr(tune_module, "report", None)
+    checkpoint_module = tune_module
+    if get_checkpoint is None or report is None:
+        train_module = ray_core["train"]
+        get_checkpoint = get_checkpoint or getattr(train_module, "get_checkpoint", None)
+        report = report or getattr(train_module, "report", None)
+        checkpoint_module = train_module
+    if get_checkpoint is None or report is None:
+        raise RuntimeError("Unable to locate Ray Tune checkpoint/report APIs.")
 
     model, optimizer, criterion = model_builder(config)
     run_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     model.to(run_device)
 
     start_epoch = 0
-    checkpoint = train_module.get_checkpoint()
+    checkpoint = get_checkpoint()
     if checkpoint:
         with checkpoint.as_directory() as checkpoint_dir:
             start_epoch = int((Path(checkpoint_dir) / "data.ckpt").read_text())
@@ -478,12 +491,14 @@ def _ray_tune_trainable(
             with tempfile.TemporaryDirectory() as checkpoint_dir:
                 (Path(checkpoint_dir) / "data.ckpt").write_text(str(epoch + 1))
                 metrics["checkpoint_epoch"] = epoch + 1
-                train_module.report(
+                report(
                     metrics,
-                    checkpoint=_checkpoint_from_directory(train_module, checkpoint_dir),
+                    checkpoint=_checkpoint_from_directory(
+                        checkpoint_module, checkpoint_dir
+                    ),
                 )
         else:
-            train_module.report(metrics)
+            report(metrics)
 
 
 def run_ray_tune(
