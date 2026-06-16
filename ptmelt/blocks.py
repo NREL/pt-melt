@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from ptmelt.layers import MELTBatchNorm, MELTBayesianDenseFlipOut
+from ptmelt.layers import MELTBatchNorm, MELTBayesianDenseFlipOut, PositionalEncoding
 
 
 def _get_initializer(initializer: str):
@@ -352,6 +352,144 @@ class BayesianBlock(MELTBlock):
         return kl_div
 
 
+class TransformerEncoderBlock(nn.Module):
+    """
+    Transformer encoder block for sequence modeling.
+
+    Args:
+        input_features (int): Number of input features per time step.
+        model_dim (int): Transformer hidden dimension.
+        num_layers (int, optional): Number of encoder layers.
+        num_heads (int, optional): Number of attention heads.
+        ff_dim (int, optional): Feed-forward hidden dimension.
+        activation (str, optional): Transformer activation, supports relu/gelu.
+        dropout (float, optional): Dropout used in transformer layers.
+        max_seq_len (int, optional): Maximum supported sequence length.
+        use_causal_mask (bool, optional): If True, apply a causal mask.
+        initializer (str, optional): Weight initializer.
+        seed (int, optional): Random seed for initialization.
+    """
+
+    def __init__(
+        self,
+        input_features: int,
+        model_dim: int,
+        num_layers: Optional[int] = 2,
+        num_heads: Optional[int] = 4,
+        ff_dim: Optional[int] = None,
+        activation: Optional[str] = "relu",
+        dropout: Optional[float] = 0.0,
+        max_seq_len: Optional[int] = 2048,
+        use_causal_mask: Optional[bool] = False,
+        initializer: Optional[str] = "glorot_uniform",
+        seed: Optional[int] = None,
+        **kwargs: Any,
+    ):
+        super(TransformerEncoderBlock, self).__init__(**kwargs)
+
+        if model_dim % num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads.")
+        if num_layers is None or num_layers <= 0:
+            raise ValueError("num_layers must be a positive integer.")
+
+        self.input_features = input_features
+        self.model_dim = model_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.ff_dim = ff_dim if ff_dim is not None else 4 * model_dim
+        self.activation = activation.lower() if activation else "relu"
+        self.dropout = dropout
+        self.max_seq_len = max_seq_len
+        self.use_causal_mask = use_causal_mask
+        self.initializer = initializer
+        self.seed = seed
+
+        if self.activation not in ["relu", "gelu"]:
+            warnings.warn(
+                f"Activation '{self.activation}' is not supported by TransformerEncoderLayer; falling back to 'relu'."
+            )
+            self.activation = "relu"
+
+        self.initializer_fn = _get_initializer(self.initializer)
+
+        self.input_projection = (
+            nn.Linear(self.input_features, self.model_dim)
+            if self.input_features != self.model_dim
+            else nn.Identity()
+        )
+        self.position_encoding = PositionalEncoding(
+            d_model=self.model_dim,
+            max_len=self.max_seq_len,
+            dropout=self.dropout,
+        )
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.model_dim,
+            nhead=self.num_heads,
+            dim_feedforward=self.ff_dim,
+            dropout=self.dropout,
+            activation=self.activation,
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=self.num_layers,
+        )
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Initialize linear layer weights with the configured initializer."""
+        torch.manual_seed(self.seed) if self.seed is not None else None
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                self.initializer_fn(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def _build_padding_mask(
+        self, sequence_length: int, lengths: torch.Tensor, device: torch.device
+    ):
+        """Build key-padding mask where True entries are padding positions."""
+        time_index = torch.arange(sequence_length, device=device).unsqueeze(0)
+        return time_index >= lengths.unsqueeze(1)
+
+    def _build_causal_mask(self, sequence_length: int, device: torch.device):
+        """Build a causal mask where True entries are disallowed positions."""
+        return torch.triu(
+            torch.ones(
+                sequence_length, sequence_length, device=device, dtype=torch.bool
+            ),
+            diagonal=1,
+        )
+
+    def forward(self, inputs: torch.Tensor, lengths: Optional[torch.Tensor] = None):
+        """Perform forward pass for a batch-first tensor [B, T, F]."""
+        x = self.input_projection(inputs)
+        x = self.position_encoding(x)
+
+        sequence_length = x.size(1)
+        key_padding_mask = None
+        if lengths is not None:
+            key_padding_mask = self._build_padding_mask(
+                sequence_length=sequence_length,
+                lengths=lengths,
+                device=x.device,
+            )
+
+        attn_mask = (
+            self._build_causal_mask(sequence_length=sequence_length, device=x.device)
+            if self.use_causal_mask
+            else None
+        )
+
+        return self.encoder(
+            src=x,
+            mask=attn_mask,
+            src_key_padding_mask=key_padding_mask,
+        )
+
+
 class DefaultOutput(nn.Module):
     """
     Default output layer with a single dense layer and optional activation function.
@@ -469,7 +607,7 @@ class MixtureDensityOutput(nn.Module):
 
         # Initialize activation layer
         self.activation_layer = _get_activation(self.activation)
-        self.softmax_layer = _get_activation("softmax")
+        self.softmax_layer = nn.Softmax(dim=-1)
 
     def forward(self, inputs: torch.Tensor):
         """Perform the forward pass of the multiple mixture output layer."""

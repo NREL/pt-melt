@@ -9,8 +9,16 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from tqdm import tqdm
 
-from ptmelt.blocks import DefaultOutput, DenseBlock, MixtureDensityOutput, ResidualBlock
-from ptmelt.losses import MixtureDensityLoss
+from ptmelt.blocks import (
+    BayesianBlock,
+    DefaultOutput,
+    DenseBlock,
+    MixtureDensityOutput,
+    ResidualBlock,
+    TransformerEncoderBlock,
+)
+from ptmelt.layers import AttentionPool, Reparameterization
+from ptmelt.losses import MixtureDensityLoss, VAELoss
 
 
 class MELTModel(nn.Module):
@@ -86,6 +94,7 @@ class MELTModel(nn.Module):
         self.seed = seed
 
         self.custom_loss = None
+        self.min_lr = None
 
         # Determine if network should be defined based on depth/width or node_list
         if self.node_list:
@@ -268,10 +277,14 @@ class MELTModel(nn.Module):
 
         return getattr(lr_scheduler, scheduler_name)(optimizer, **kwargs)
 
-    def step(self, dataloader, optimizer, criterion, device="cpu", training=True):
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=True, **kwargs
+    ):
         """
         Perform a single step either in training or validation mode.
 
+        Args:
+            **kwargs: Additional keyword arguments for model-specific step logic.
         """
         self.train() if training else self.eval()
 
@@ -321,6 +334,7 @@ class MELTModel(nn.Module):
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         stopping: Optional[bool] = True,
         verbose=False,
+        **step_kwargs,
     ):
         """
         Perform the model training loop.
@@ -332,9 +346,9 @@ class MELTModel(nn.Module):
             criterion (Loss): The loss function to use.
             num_epochs (int): The number of epochs to train the model.
             device (str, optional): The device to use for training. Defaults to 'cpu'.
-
-            verbose (bool, optional): Whether to print training statistics. Defaults to
-                                      False.
+            **step_kwargs: Additional keyword arguments passed to the step method.
+            stopping (bool, optional): Whether to enable early stopping based on min_lr. Defaults to True.
+            verbose (bool, optional): Whether to print training statistics. Defaults to False.
         """
         # Move model to device
         self.to(device)
@@ -346,10 +360,20 @@ class MELTModel(nn.Module):
         for epoch in tqdm(range(num_epochs), disable=not verbose):
             # Perform a training and validation step
             train_loss = self.step(
-                train_dl, optimizer, criterion, device=device, training=True
+                train_dl,
+                optimizer,
+                criterion,
+                device=device,
+                training=True,
+                **step_kwargs,
             )
             val_loss = self.step(
-                val_dl, optimizer, criterion, device=device, training=False
+                val_dl,
+                optimizer,
+                criterion,
+                device=device,
+                training=False,
+                **step_kwargs,
             )
             # Step the scheduler if provided
             if scheduler:
@@ -742,10 +766,14 @@ class BayesianNeuralNetwork(MELTModel):
         # Apply the output layer(s) and return
         return self.layer_dict["output"](x)
 
-    def step(self, dataloader, optimizer, criterion, device="cpu", training=True):
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=True, **kwargs
+    ):
         """
         Perform a single step either in training or validation mode.
 
+        Args:
+            **kwargs: Additional keyword arguments for model-specific step logic.
         """
         self.train() if training else self.eval()
         dataset_size = len(dataloader.dataset)
@@ -1066,12 +1094,28 @@ class RecurrentNeuralNetwork(MELTModel):
 
         return self.layer_dict["output"](feat)
 
-    def step(self, dataloader, optimizer, criterion, device="cpu", training=True):
+    def step(
+        self,
+        dataloader,
+        optimizer,
+        criterion,
+        device="cpu",
+        training=True,
+        suffix_crop=False,
+        **kwargs,
+    ):
         """
         Perform a single step either in training or validation mode.
 
+        Args:
+            suffix_crop (bool): Whether to apply random suffix cropping for data augmentation.
+            **kwargs: Additional keyword arguments for model-specific step logic.
+                min_length (int): Minimum length for random suffix cropping. Defaults to 32.
         """
         self.train() if training else self.eval()
+
+        # Get min_length from kwargs with default value of 32
+        min_length = kwargs.get("min_length", 32)
 
         context_manager = torch.no_grad() if not training else nullcontext()
 
@@ -1086,9 +1130,14 @@ class RecurrentNeuralNetwork(MELTModel):
                     lengths = None
 
                 # If training, perform random suffix cropping for data augmentation
-                if training and lengths is not None and x_in.size(1) >= 32:
+                if (
+                    training
+                    and lengths is not None
+                    and x_in.size(1) >= min_length
+                    and suffix_crop
+                ):
                     x_in, y_in, lengths = self._random_suffix_crop(
-                        x_in, y_in, lengths, min_length=32
+                        x_in, y_in, lengths, min_length=min_length
                     )
 
                 # Move data to device
@@ -1128,6 +1177,439 @@ class RecurrentNeuralNetwork(MELTModel):
         # Normalize loss
         running_loss /= len(dataloader)
         return running_loss
+
+
+class TemporalTransformerNetwork(MELTModel):
+    """
+    Temporal Transformer model for sequence-to-one forecasting.
+
+    Args:
+        num_heads (int, optional): Number of attention heads.
+        ff_dim (int, optional): Feed-forward hidden dimension in encoder layers.
+        max_seq_len (int, optional): Maximum supported sequence length.
+        head_type (str, optional): Sequence pooling strategy. One of: last, attn, mean, max.
+        use_causal_mask (bool, optional): Whether to apply causal attention masking.
+        **kwargs: Additional MELTModel keyword arguments.
+    """
+
+    def __init__(
+        self,
+        num_heads: Optional[int] = 4,
+        ff_dim: Optional[int] = None,
+        max_seq_len: Optional[int] = 2048,
+        head_type: Optional[str] = "last",
+        use_causal_mask: Optional[bool] = False,
+        **kwargs,
+    ):
+        super(TemporalTransformerNetwork, self).__init__(**kwargs)
+
+        if self.depth is None or self.depth <= 0:
+            raise ValueError("depth must be a positive integer for transformer models.")
+        if self.width is None or self.width <= 0:
+            raise ValueError("width must be a positive integer for transformer models.")
+        if self.width % num_heads != 0:
+            raise ValueError("width must be divisible by num_heads.")
+
+        if self.node_list is not None:
+            warnings.warn(
+                "Warning: node_list is ignored by TemporalTransformerNetwork; "
+                "using width and depth settings."
+            )
+
+        self.num_heads = num_heads
+        self.ff_dim = ff_dim
+        self.max_seq_len = max_seq_len
+        self.use_causal_mask = use_causal_mask
+
+        self.hidden_size = self.width
+        self.num_layers = self.depth
+        self.transformer_out_dim = self.hidden_size
+
+        self.head_type = head_type.lower()
+        if self.head_type not in ["last", "attn", "mean", "max"]:
+            raise ValueError("head_type must be one of: 'last', 'attn', 'mean', 'max'.")
+
+    def create_output_layer(self):
+        """Override to use transformer_out_dim as output head input width."""
+        if self.num_mixtures > 0:
+            head = MixtureDensityOutput(
+                input_features=self.transformer_out_dim,
+                num_mixtures=self.num_mixtures,
+                num_outputs=self.num_outputs,
+                activation=self.output_activation,
+                initializer=self.initializer,
+                seed=self.seed,
+            )
+        else:
+            head = DefaultOutput(
+                input_features=self.transformer_out_dim,
+                output_features=self.num_outputs,
+                activation=self.output_activation,
+                initializer=self.initializer,
+                seed=self.seed,
+            )
+
+        self.layer_dict.update({"output": head})
+        self.sub_layer_names.append("output")
+
+    def initialize_layers(self):
+        """Initialize dropout, transformer encoder, and output layers."""
+        super(TemporalTransformerNetwork, self).initialize_layers()
+
+        self.layer_dict.update(
+            {
+                "transformer_block": TransformerEncoderBlock(
+                    input_features=self.num_features,
+                    model_dim=self.hidden_size,
+                    num_layers=self.num_layers,
+                    num_heads=self.num_heads,
+                    ff_dim=self.ff_dim,
+                    activation=self.act_fun,
+                    dropout=self.dropout,
+                    max_seq_len=self.max_seq_len,
+                    use_causal_mask=self.use_causal_mask,
+                    initializer=self.initializer,
+                    seed=self.seed,
+                )
+            }
+        )
+        self.sub_layer_names.append("transformer_block")
+
+        if self.head_type == "attn":
+            self.layer_dict["pool_head"] = AttentionPool(self.hidden_size)
+        else:
+            self.layer_dict["pool_head"] = None
+
+    def _select_last_timestep(self, transformer_out, lengths):
+        """Select the last valid timestep for each sequence in the batch."""
+        batch_size, _, features = transformer_out.size()
+        idx = (lengths - 1).view(-1, 1).expand(batch_size, features).unsqueeze(1)
+        return transformer_out.gather(1, idx).squeeze(1)
+
+    def _compute_mean_timestep(self, transformer_out, lengths):
+        """Compute mean over valid timesteps for each sequence."""
+        batch_size, time_steps, _ = transformer_out.size()
+        mask = (
+            torch.arange(time_steps, device=transformer_out.device)
+            .unsqueeze(0)
+            .expand(batch_size, time_steps)
+            < lengths.unsqueeze(1)
+        ).float()
+        summed = (transformer_out * mask.unsqueeze(-1)).sum(dim=1)
+        counts = mask.sum(dim=1).clamp_min(1.0).unsqueeze(-1)
+        return summed / counts
+
+    def _compute_max_timestep(self, transformer_out, lengths):
+        """Compute max over valid timesteps for each sequence."""
+        batch_size, time_steps, _ = transformer_out.size()
+        mask = torch.arange(time_steps, device=transformer_out.device).unsqueeze(
+            0
+        ).expand(batch_size, time_steps) < lengths.unsqueeze(1)
+        masked = transformer_out.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        return masked.max(dim=1).values
+
+    def forward(self, inputs: torch.Tensor, lengths: Optional[torch.Tensor] = None):
+        """Perform forward pass for sequence-to-one forecasting."""
+        x = (
+            self.layer_dict["input_dropout"](inputs)
+            if self.input_dropout > 0
+            else inputs
+        )
+
+        transformer_out = self.layer_dict["transformer_block"](x, lengths=lengths)
+
+        if self.head_type == "attn":
+            features = self.layer_dict["pool_head"](transformer_out, lengths=lengths)
+        elif self.head_type == "mean":
+            if lengths is None:
+                features = transformer_out.mean(dim=1)
+            else:
+                features = self._compute_mean_timestep(transformer_out, lengths)
+        elif self.head_type == "max":
+            if lengths is None:
+                features = transformer_out.max(dim=1).values
+            else:
+                features = self._compute_max_timestep(transformer_out, lengths)
+        else:
+            features = (
+                self._select_last_timestep(transformer_out, lengths)
+                if lengths is not None
+                else transformer_out[:, -1, :]
+            )
+
+        return self.layer_dict["output"](features)
+
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=True, **kwargs
+    ):
+        """Perform one training/validation epoch with optional sequence lengths."""
+        self.train() if training else self.eval()
+
+        context_manager = torch.no_grad() if not training else nullcontext()
+
+        running_loss = 0.0
+        with context_manager:
+            for batch in dataloader:
+                if len(batch) == 3:
+                    x_in, y_in, lengths = batch
+                    lengths = lengths.to(device)
+                else:
+                    x_in, y_in = batch
+                    lengths = None
+
+                x_in, y_in = x_in.to(device), y_in.to(device)
+
+                pred = self(x_in, lengths=lengths)
+                loss = criterion(pred, y_in)
+
+                if training:
+                    if self.l1_reg > 0:
+                        loss += self.l1_regularization(lambda_l1=self.l1_reg)
+                    if self.l2_reg > 0:
+                        loss += self.l2_regularization(lambda_l2=self.l2_reg)
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                    optimizer.step()
+
+                running_loss += loss.item()
+
+        running_loss /= len(dataloader)
+        return running_loss
+
+
+class ForecastEnsemble(MELTModel):
+    """
+    Ensemble wrapper for existing MELT models with matching forecasting outputs.
+
+    This class keeps the public MELT-style API while composing already-defined
+    models. The first implementation intentionally stays narrow: all members must
+    share the same input/output contract and currently use deterministic outputs.
+
+    Args:
+        models (List[MELTModel]): Member models to aggregate.
+        aggregation (str, optional): Aggregation strategy. One of: 'mean', 'weighted'.
+        weights (List[float], optional): Optional ensemble weights.
+        **kwargs: Ignored extra keyword arguments for compatibility.
+    """
+
+    def __init__(
+        self,
+        models: List[MELTModel],
+        aggregation: Optional[str] = "mean",
+        weights: Optional[List[float]] = None,
+        **kwargs,
+    ):
+        if not models:
+            raise ValueError("ForecastEnsemble requires at least one member model.")
+
+        reference_model = models[0]
+        super(ForecastEnsemble, self).__init__(
+            num_features=reference_model.num_features,
+            num_outputs=reference_model.num_outputs,
+            width=reference_model.width,
+            depth=reference_model.depth,
+            act_fun=reference_model.act_fun,
+            dropout=reference_model.dropout,
+            input_dropout=reference_model.input_dropout,
+            batch_norm=reference_model.batch_norm,
+            batch_norm_type=reference_model.batch_norm_type,
+            use_batch_renorm=reference_model.use_batch_renorm,
+            output_activation=reference_model.output_activation,
+            initializer=reference_model.initializer,
+            l1_reg=0.0,
+            l2_reg=0.0,
+            num_mixtures=0,
+            node_list=None,
+            seed=reference_model.seed,
+            **kwargs,
+        )
+
+        self.models = nn.ModuleList(models)
+        self.num_members = len(self.models)
+        self.aggregation = aggregation.lower()
+        if self.aggregation not in ["mean", "weighted"]:
+            raise ValueError("aggregation must be one of: 'mean', 'weighted'.")
+
+        self._validate_members()
+        weight_tensor = self._initialize_weights(weights)
+        self.register_buffer("ensemble_weights", weight_tensor)
+
+    def _validate_members(self):
+        """Validate that all member models share the same basic contract."""
+        for model in self.models:
+            if model.num_features != self.num_features:
+                raise ValueError(
+                    "All ensemble members must have the same num_features."
+                )
+            if model.num_outputs != self.num_outputs:
+                raise ValueError("All ensemble members must have the same num_outputs.")
+            if model.num_mixtures > 0:
+                raise NotImplementedError(
+                    "ForecastEnsemble currently supports deterministic member outputs only."
+                )
+
+    def _initialize_weights(self, weights: Optional[List[float]]):
+        """Initialize normalized ensemble weights."""
+        if weights is None:
+            return torch.full((self.num_members,), 1.0 / self.num_members)
+
+        if len(weights) != self.num_members:
+            raise ValueError("weights must match the number of ensemble members.")
+
+        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        if torch.any(weight_tensor < 0):
+            raise ValueError("weights must be non-negative.")
+
+        weight_sum = weight_tensor.sum()
+        if weight_sum <= 0:
+            raise ValueError("weights must sum to a positive value.")
+
+        return weight_tensor / weight_sum
+
+    def build(self):
+        """Build each member model if it has not already been initialized."""
+        for model in self.models:
+            if hasattr(model, "layer_dict") and len(model.layer_dict) == 0:
+                model.build()
+
+    def _forward_member(
+        self, model: MELTModel, inputs: torch.Tensor, lengths: Optional[torch.Tensor]
+    ):
+        """Forward one member while accommodating sequence-aware and plain models."""
+        try:
+            return model(inputs, lengths=lengths)
+        except TypeError:
+            return model(inputs)
+
+    def _aggregate_predictions(self, prediction_stack: torch.Tensor):
+        """Aggregate member predictions into a single ensemble prediction."""
+        if self.aggregation == "mean":
+            return prediction_stack.mean(dim=0)
+
+        weights = self.ensemble_weights.view(-1, 1, 1).to(prediction_stack.device)
+        return (prediction_stack * weights).sum(dim=0)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+        return_member_predictions: Optional[bool] = False,
+    ):
+        """Run each member and aggregate predictions across the ensemble."""
+        member_predictions = [
+            self._forward_member(model, inputs, lengths) for model in self.models
+        ]
+        prediction_stack = torch.stack(member_predictions, dim=0)
+        ensemble_prediction = self._aggregate_predictions(prediction_stack)
+
+        if return_member_predictions:
+            return ensemble_prediction, prediction_stack
+
+        return ensemble_prediction
+
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=False, **kwargs
+    ):
+        """Evaluate ensemble loss; member training is handled by `fit`."""
+        if training:
+            raise NotImplementedError(
+                "ForecastEnsemble does not support joint training with one optimizer. "
+                "Use fit() with one optimizer per member model."
+            )
+
+        self.eval()
+        running_loss = 0.0
+
+        with torch.no_grad():
+            for batch in dataloader:
+                if len(batch) == 3:
+                    x_in, y_in, lengths = batch
+                    lengths = lengths.to(device)
+                else:
+                    x_in, y_in = batch
+                    lengths = None
+
+                x_in, y_in = x_in.to(device), y_in.to(device)
+                pred = self(x_in, lengths=lengths)
+                running_loss += criterion(pred, y_in).item()
+
+        running_loss /= len(dataloader)
+        return running_loss
+
+    def fit(
+        self,
+        train_dl,
+        val_dl,
+        optimizers,
+        criterion,
+        num_epochs: Optional[int] = 100,
+        device: Optional[str] = "cpu",
+        schedulers=None,
+        stopping: Optional[bool] = True,
+        verbose=False,
+        **step_kwargs,
+    ):
+        """Train ensemble members sequentially using member-specific optimizers."""
+        if not isinstance(optimizers, (list, tuple)):
+            raise ValueError(
+                "ForecastEnsemble.fit requires a list or tuple of optimizers, one per member."
+            )
+        if len(optimizers) != self.num_members:
+            raise ValueError("optimizers must match the number of ensemble members.")
+
+        criteria = (
+            list(criterion)
+            if isinstance(criterion, (list, tuple))
+            else [criterion for _ in range(self.num_members)]
+        )
+        if len(criteria) != self.num_members:
+            raise ValueError("criterion must be a single loss or one per member.")
+
+        if schedulers is None:
+            scheduler_list = [None for _ in range(self.num_members)]
+        elif isinstance(schedulers, (list, tuple)):
+            scheduler_list = list(schedulers)
+        else:
+            scheduler_list = [schedulers for _ in range(self.num_members)]
+
+        if len(scheduler_list) != self.num_members:
+            raise ValueError("schedulers must match the number of ensemble members.")
+
+        self.build()
+        self.history = {"member_histories": [], "val_loss": []}
+
+        for model, optimizer, member_criterion, scheduler in zip(
+            self.models, optimizers, criteria, scheduler_list
+        ):
+            model.min_lr = getattr(model, "min_lr", None)
+            model.fit(
+                train_dl,
+                val_dl,
+                optimizer,
+                member_criterion,
+                num_epochs=num_epochs,
+                device=device,
+                scheduler=scheduler,
+                stopping=stopping,
+                verbose=verbose,
+                **step_kwargs,
+            )
+            self.history["member_histories"].append(model.history)
+
+        self.to(device)
+        if val_dl is not None:
+            self.history["val_loss"].append(
+                self.step(
+                    val_dl,
+                    optimizer=None,
+                    criterion=criteria[0],
+                    device=device,
+                    training=False,
+                    **step_kwargs,
+                )
+            )
 
 
 class VariationalAutoencoder(MELTModel):
@@ -1241,10 +1723,14 @@ class VariationalAutoencoder(MELTModel):
 
         return mix_coeffs, means, log_vars
 
-    def step(self, dataloader, optimizer, criterion, device="cpu", training=True):
+    def step(
+        self, dataloader, optimizer, criterion, device="cpu", training=True, **kwargs
+    ):
         """
         Perform a single step either in training or validation mode.
 
+        Args:
+            **kwargs: Additional keyword arguments for model-specific step logic.
         """
         self.train() if training else self.eval()
 

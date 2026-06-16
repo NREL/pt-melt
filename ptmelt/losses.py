@@ -93,7 +93,7 @@ class MixtureDensityLoss(nn.Module):
         if self.mse_weight > 0.0:
             mix_mean = (m_coeffs.unsqueeze(-1) * mean_preds).sum(dim=1)
             mse_loss = F.mse_loss(mix_mean, y_true, reduction="none").mean(dim=-1)
-            loss += self.mse_weight * mse_loss
+            loss = loss + self.mse_weight * mse_loss
 
         # Apply reduction to the loss
         if self.reduction == "mean":

@@ -38,6 +38,44 @@ If you want to run the example notebooks, they require a couple additional packa
 2. `ipykernel`
 3. `matplotlib`
 
+## Hyperparameter tuning
+
+PT-MELT includes native helpers for Ray Tune workflows in `ptmelt.utils.hp_tuning`.
+The builder supports `ann`, `resnet`, `bnn`, `rnn`, `temporal_transformer`, and
+`vae` model configurations.
+
+```python
+from ray import tune
+from ptmelt.utils.hp_tuning import run_ray_tune
+
+result = run_ray_tune(
+	train_dl=train_dl,
+	val_dl=val_dl,
+	base_config={
+		"arch_type": "ann",
+		"num_features": num_features,
+		"num_outputs": num_outputs,
+		"epochs": 25,
+		"learning_rate": 1e-3,
+		"loss_fn": "mse",
+	},
+	search_space={
+		"width": tune.choice([32, 64, 128]),
+		"depth": tune.randint(1, 5),
+	},
+	metric="val_loss",
+	mode="min",
+	num_samples=20,
+)
+
+print(result.best_config)
+print(result.best_hyperparameters)
+print(result.metric_details)
+```
+
+`run_ray_tune` returns best configuration details, the searched hyperparameter
+subset, selected metric details, and per-trial history dataframes.
+
 ## Contributing
 
 pip install black isort flake8
