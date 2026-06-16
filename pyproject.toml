@@ -36,9 +36,9 @@ dependencies = [
     "bayesian-optimization",
     "ax-platform",
     "safetensors",
-    'torch ; sys_platform == "linux" or sys_platform == "darwin"',
-    'torchvision ; sys_platform == "linux" or sys_platform == "darwin"',
-    'torchaudio ; sys_platform == "linux" or sys_platform == "darwin"',
+    "torch",
+    "torchvision",
+    "torchaudio",
 ]
 
 [project.urls]
