@@ -418,18 +418,24 @@ def _ray_tune_trainable(
     ray_core = _require_ray_core()
     tune_module = ray_core["tune"]
 
-    # Prefer Tune-native APIs when running a Tune function trainable.
-    # Keep fallbacks for older Ray versions where these lived under ray.train.
+    # Use Tune-native APIs inside Tune function trainables.
+    # Calling ray.train.get_checkpoint/report in this context now raises
+    # a DeprecationWarning exception in newer Ray releases.
     get_checkpoint = getattr(tune_module, "get_checkpoint", None)
     report = getattr(tune_module, "report", None)
-    checkpoint_module = tune_module
+
+    # Some Ray versions expose these APIs under tune.session.
+    tune_session = getattr(tune_module, "session", None)
+    if tune_session is not None:
+        get_checkpoint = get_checkpoint or getattr(tune_session, "get_checkpoint", None)
+        report = report or getattr(tune_session, "report", None)
+
     if get_checkpoint is None or report is None:
-        train_module = ray_core["train"]
-        get_checkpoint = get_checkpoint or getattr(train_module, "get_checkpoint", None)
-        report = report or getattr(train_module, "report", None)
-        checkpoint_module = train_module
-    if get_checkpoint is None or report is None:
-        raise RuntimeError("Unable to locate Ray Tune checkpoint/report APIs.")
+        raise RuntimeError(
+            "Unable to locate Ray Tune checkpoint/report APIs. "
+            "Please use a Ray version that provides tune.get_checkpoint "
+            "and tune.report (or equivalents under tune.session)."
+        )
 
     model, optimizer, criterion = model_builder(config)
     run_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -494,7 +500,7 @@ def _ray_tune_trainable(
                 report(
                     metrics,
                     checkpoint=_checkpoint_from_directory(
-                        checkpoint_module, checkpoint_dir
+                        tune_module, checkpoint_dir
                     ),
                 )
         else:
