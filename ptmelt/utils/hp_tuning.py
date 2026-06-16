@@ -499,9 +499,7 @@ def _ray_tune_trainable(
                 metrics["checkpoint_epoch"] = epoch + 1
                 report(
                     metrics,
-                    checkpoint=_checkpoint_from_directory(
-                        tune_module, checkpoint_dir
-                    ),
+                    checkpoint=_checkpoint_from_directory(tune_module, checkpoint_dir),
                 )
         else:
             report(metrics)
